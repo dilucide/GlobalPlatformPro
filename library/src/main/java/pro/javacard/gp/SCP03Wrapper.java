@@ -42,6 +42,14 @@ class SCP03Wrapper extends SecureChannelWrapper {
     private String buggyCounterEnv = System.getenv().getOrDefault(COUNTER_WORKAROUND.replace(".", "_").toUpperCase(), "false");
     private boolean counterIsBuggy = System.getProperty(COUNTER_WORKAROUND, buggyCounterEnv).equalsIgnoreCase("true");
 
+    private boolean isS16 = false;
+    public void enableS16() {
+        isS16 = true;
+    }
+    public boolean isS16Enabled() {
+        return isS16;
+    }
+
     SCP03Wrapper(byte[] enc, byte[] mac, byte[] rmac, int bs) {
         super(enc, mac, rmac, bs);
     }
@@ -49,6 +57,8 @@ class SCP03Wrapper extends SecureChannelWrapper {
     @Override
     protected CommandAPDU wrap(CommandAPDU command) throws GPException {
         byte[] cmd_mac = null;
+
+        int macLen = (isS16) ? 16 : 8;
 
         try {
             int cla = command.getCLA();
@@ -82,7 +92,7 @@ class SCP03Wrapper extends SecureChannelWrapper {
             // Calculate C-MAC
             if (mac) {
                 cla |= 0x4;
-                lc = lc + 8;
+                lc = lc + macLen;
 
                 ByteArrayOutputStream bo = new ByteArrayOutputStream();
                 bo.write(chaining_value);
@@ -97,7 +107,7 @@ class SCP03Wrapper extends SecureChannelWrapper {
                 // Set new chaining value
                 System.arraycopy(cmac, 0, chaining_value, 0, chaining_value.length);
                 // 8 bytes for actual mac
-                cmd_mac = Arrays.copyOf(cmac, 8);
+                cmd_mac = Arrays.copyOf(cmac, macLen);
             }
             // Constructing new a new command APDU ensures that the coding of LC and NE is correct; especially for Extend Length APDUs
             CommandAPDU newAPDU = null;
@@ -125,9 +135,11 @@ class SCP03Wrapper extends SecureChannelWrapper {
 
     @Override
     protected ResponseAPDU unwrap(ResponseAPDU response) throws GPException {
+        int macLen = (isS16) ? 16 : 8;
+
         try {
             if (rmac) {
-                if (response.getData().length < 8) {
+                if (response.getData().length < macLen) {
                     // Per GP 2.2, Amendment D, v1.1.1(+), section 6.2.5, all non-error R-APDUs must have a MAC.
                     // R-APDUs representing an error status shall not have a data segment or MAC.
                     if (response.getSW() == 0x9000 || response.getSW1() == 0x62 || response.getSW1() == 0x63) {
@@ -139,10 +151,10 @@ class SCP03Wrapper extends SecureChannelWrapper {
                     // We therefore return unaltered.
                     return response;
                 }
-                int respLen = response.getData().length - 8;
+                int respLen = response.getData().length - macLen;
 
-                byte[] actualMac = new byte[8];
-                System.arraycopy(response.getData(), respLen, actualMac, 0, 8);
+                byte[] actualMac = new byte[macLen];
+                System.arraycopy(response.getData(), respLen, actualMac, 0, macLen);
 
                 ByteArrayOutputStream bo = new ByteArrayOutputStream();
                 bo.write(chaining_value);
@@ -153,9 +165,7 @@ class SCP03Wrapper extends SecureChannelWrapper {
                 byte[] cmac_input = bo.toByteArray();
 
                 byte[] cmac = GPCrypto.scp03_mac(rmacKey, cmac_input, 128);
-
-                // 8 bytes for actual mac
-                byte[] resp_mac = Arrays.copyOf(cmac, 8);
+                byte[] resp_mac = Arrays.copyOf(cmac, macLen);
 
                 if (!Arrays.equals(resp_mac, actualMac)) {
                     throw new GPException("RMAC invalid: " + HexUtils.bin2hex(actualMac) + " vs " + HexUtils.bin2hex(resp_mac));

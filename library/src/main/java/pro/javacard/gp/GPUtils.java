@@ -38,6 +38,16 @@ import java.util.List;
 
 public class GPUtils {
     private GPUtils() {}
+
+
+    public static boolean scp03IsPRNG(int i) {
+        return ((i & 0x10) == 0x10);
+    }
+
+    public static boolean scp03IsS16(int i) {
+        return ((i & 0x01) == 0x01);
+    }
+
     // Knows both hex and dec
     public static int intValue(String s) {
         if (s.trim().toLowerCase().startsWith("0x")) {

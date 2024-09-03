@@ -371,7 +371,9 @@ public class GPSession {
         logger.info("Using card master keys with version {} for setting up session with {} ", keys.getKeyInfo().getVersion(), securityLevel.stream().map(Enum::name).collect(Collectors.joining(", ")));
         // DWIM: Generate host challenge
         if (host_challenge == null) {
-            host_challenge = new byte[8];
+            // In SCP03 S16 mode, the challenge and MAC values have a length of 16 bytes.
+            // FIXME: If no SCP version is specified, this will result in an incorrect length SW should the card require S16 per internal SCP policy. It is probably best to handle this upstream, though.
+            host_challenge = new byte[((scp != null) && (scp.scp == GPSecureChannelVersion.SCP.SCP03) && (GPUtils.scp03IsS16(scp.i))) ? 16 : 8];
             GPCrypto.random.nextBytes(host_challenge);
             logger.trace("Generated host challenge: " + HexUtils.bin2hex(host_challenge));
         }
@@ -392,8 +394,35 @@ public class GPSession {
         GPException.check(response, "INITIALIZE UPDATE failed");
         byte[] update_response = response.getData();
 
-        // Verify response length (SCP01/SCP02 + SCP03 + SCP03 w/ pseudorandom)
-        if (update_response.length != 28 && update_response.length != 29 && update_response.length != 32) {
+        // Verify response length based on protocol
+        int expectedLength = 0;
+        int challengeLength = 8;
+        switch (update_response[11]) {
+            case 0x01:
+            case 0x02:
+            expectedLength = 28;
+            break;
+
+            case 0x03:
+            // SCP03 response length is dependend on i.b1 and i.b5
+            expectedLength = 29;
+
+            int scp03i = update_response[12];
+            if (GPUtils.scp03IsPRNG(scp03i)) {
+                // Pseudo random card challenge will result in a three byte sequence counter being appended to the regular response
+                expectedLength += 3;
+            }
+            if (GPUtils.scp03IsS16(scp03i)) {
+                // SCP03 v1.2 specifies a new mode supporting 16 byte challenges and MACs (S16). This will result in a doubling of the card challenge and card cryptogram lengths
+                expectedLength += 16;
+                challengeLength = 16;
+            }
+
+            default:
+            throw new GPException("Unsupported SCP version");
+        }
+
+        if (update_response.length != expectedLength) {
             throw new GPException("Invalid INITIALIZE UPDATE response length: " + update_response.length);
         }
         // Parse the response
@@ -416,19 +445,19 @@ public class GPSession {
         }
 
         // get card challenge
-        byte[] card_challenge = Arrays.copyOfRange(update_response, offset, offset + 8);
+        byte[] card_challenge = Arrays.copyOfRange(update_response, offset, offset + challengeLength);
         offset += card_challenge.length;
 
         // get card cryptogram
-        byte[] card_cryptogram = Arrays.copyOfRange(update_response, offset, offset + 8);
+        byte[] card_cryptogram = Arrays.copyOfRange(update_response, offset, offset + challengeLength);
         offset += card_cryptogram.length;
 
         // Extract ssc
         final byte[] seq;
         if (this.scpVersion.scp == SCP02) {
             seq = Arrays.copyOfRange(update_response, 12, 14);
-        } else if (this.scpVersion.scp == SCP03 && update_response.length == 32) {
-            seq = Arrays.copyOfRange(update_response, offset, 32);
+        } else if (this.scpVersion.scp == SCP03 && (GPUtils.scp03IsPRNG(this.scpVersion.i))) {
+            seq = Arrays.copyOfRange(update_response, offset, offset + 3);
             offset += seq.length;
         } else {
             seq = null;
@@ -480,7 +509,7 @@ public class GPSession {
         if (this.scpVersion.scp == SCP01 || this.scpVersion.scp == SCP02) {
             my_card_cryptogram = GPCrypto.mac_3des_nulliv(encKey, cntx);
         } else {
-            my_card_cryptogram = GPCrypto.scp03_kdf(macKey, (byte) 0x00, cntx, 64);
+            my_card_cryptogram = GPCrypto.scp03_kdf(macKey, (byte) 0x00, cntx, challengeLength * 8);
         }
 
         // This is the main check for possible successful authentication.
@@ -505,8 +534,11 @@ public class GPSession {
                 wrapper = new SCP02Wrapper(encKey, macKey, rmacKey, blockSize);
                 break;
             case SCP03:
-                host_cryptogram = GPCrypto.scp03_kdf(macKey, (byte) 0x01, cntx, 64);
+                host_cryptogram = GPCrypto.scp03_kdf(macKey, (byte) 0x01, cntx, challengeLength * 8);
                 wrapper = new SCP03Wrapper(encKey, macKey, rmacKey, blockSize);
+                if (GPUtils.scp03IsS16(this.scpVersion.i)) {
+                    ((SCP03Wrapper)wrapper).enableS16();
+                }
                 break;
             default:
                 throw new IllegalStateException("Unknown SCP");
